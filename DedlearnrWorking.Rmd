@@ -1,0 +1,225 @@
+---
+title: "Dedlearnr Vignette"
+author: "Trevor Riley"
+date: "`r Sys.Date()`"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+#Install the remotes packages to enable installation from GitHub
+```{r}
+#install.packages("remotes")
+#library(remotes)
+#remotes::install_github("ESHackathon/CiteSource")
+```
+
+```{r}
+# Load required libraries
+library(dplyr)
+library(tidyr)
+library(CiteSource)
+```
+
+```{r}
+# This code came from the CiteSource package
+# Set file path
+file_path <- "C:/Users/trevor.riley/Documents/Rwork/Dedlearnr/RIS/"
+
+# Create metadata table
+metadata_tbl <- tibble::tribble(
+  ~files, ~cite_sources, ~cite_labels,
+  "Primary.ris", "primary", NA,
+  "Secondary.ris", "secondary", NA
+) %>%
+  dplyr::mutate(files = paste0(file_path, files))
+
+# Read citations
+citations <- read_citations(metadata = metadata_tbl)
+
+# Rename columns (for whatever reason Custom 2 was listed as pubmed_id)
+citations <- citations %>%
+  rename(IDS = pubmed_id, UID = C1)
+
+cleancitations <- select(citations, -c(database, supertaxa, ID, LB, ZZ, language, notes, source_abbreviated, date_generated, ET, date_generated, address))
+
+```
+
+
+```{r}
+preprocess_citations <- function(df) {
+  # Lowercase all character columns
+  lowercase_columns <- function(df) {
+    character_columns <- sapply(df, is.character)
+    df[, character_columns] <- lapply(df[, character_columns], tolower)
+    return(df)
+  }
+  
+  # Remove special characters and extra whitespace
+  remove_special_characters <- function(text) {
+    return(gsub("[^a-z0-9[:space:]]", "", text))
+  }
+
+  trim_whitespace <- function(text) {
+    return(gsub("\\s+", " ", trimws(text)))
+  }
+
+  clean_text_columns <- function(df) {
+    character_columns <- sapply(df, is.character)
+    columns_to_clean <- character_columns
+    columns_to_clean["IDS"] <- FALSE # exclude the "IDS" column from cleaning
+    columns_to_clean[ "start_page"] <- FALSE
+    columns_to_clean["author"] <- FALSE
+    df[, columns_to_clean] <- lapply(df[, columns_to_clean], remove_special_characters)
+    df[, columns_to_clean] <- lapply(df[, columns_to_clean], trim_whitespace)
+    return(df)
+  }
+  
+  # Apply preprocessing functions
+  df <- lowercase_columns(df)
+  df <- clean_text_columns(df)
+  
+  return(df)
+}
+
+cleanercitations <- preprocess_citations(cleancitations)
+```
+
+```{r}
+# Filter primary and secondary citations
+primary_citations <- citations %>% dplyr::filter(cite_source == "primary")
+secondary_citations <- citations %>% dplyr::filter(cite_source == "secondary")
+```
+
+
+```{r}
+find_matching_citations <- function(primary_citations, secondary_citations) {
+  duplicate_pairs <- list()
+  
+  for (i in 1:nrow(secondary_citations)) {
+    secondary_uid <- secondary_citations$UID[i]
+    
+    for (j in 1:nrow(primary_citations)) {
+      primary_ids <- strsplit(primary_citations$IDS[j], split = ",")[[1]]
+      primary_ids <- trimws(primary_ids) # Remove whitespace from primary_ids
+      
+      if (secondary_uid %in% primary_ids) {
+        duplicate_pairs[[length(duplicate_pairs) + 1]] <- list(primary_citation = primary_citations[j, ], secondary_citation = secondary_citations[i, ])
+      }
+    }
+  }
+  
+  return(duplicate_pairs)
+}
+
+# Find duplicate pairs
+duplicate_pairs <- find_matching_citations(primary_citations, secondary_citations)
+```
+
+
+```{r}
+jaccard_similarity <- function(set1, set2) {
+  intersection_size <- length(intersect(set1, set2))
+  union_size <- length(union(set1, set2))
+  
+  if (union_size == 0) {
+    return(0)
+  }
+  
+  return(intersection_size / union_size)
+}
+
+compute_field_similarities <- function(duplicate_pair, selected_fields) {
+  primary_citation <- duplicate_pair$primary_citation
+  secondary_citation <- duplicate_pair$secondary_citation
+  
+  field_similarities <- list()
+  
+  for (field_name in selected_fields) {
+    primary_field <- strsplit(primary_citation[[field_name]], split = "\\s+")[[1]]
+    secondary_field <- strsplit(secondary_citation[[field_name]], split = "\\s+")[[1]]
+    
+    field_similarity <- jaccard_similarity(primary_field, secondary_field)
+    field_similarities[[field_name]] <- field_similarity
+  }
+  
+  return(field_similarities)
+}
+
+# Select the specific fields you want to compare
+selected_fields <- c("title", "source", "volume", "issue", "abstract", "doi", "author")
+
+# Calculate the field similarities for each duplicate pair using the selected fields
+field_similarities_list <- lapply(duplicate_pairs, compute_field_similarities, selected_fields = selected_fields)
+
+# Convert the list of field similarities into a data frame
+field_similarities_df <- do.call(rbind, lapply(field_similarities_list, function(x) data.frame(t(unlist(x)))))
+
+
+```
+
+```{r}
+library(tibble)
+summary_statistics <- function(df) {
+  min_values <- apply(df, 2, min)
+  max_values <- apply(df, 2, max)
+  mean_values <- apply(df, 2, mean)
+  median_values <- apply(df, 2, median)
+  
+  summary_df <- data.frame(
+    min = min_values,
+    max = max_values,
+    mean = mean_values,
+    median = median_values,
+    stringsAsFactors = FALSE
+  )
+  
+  return(summary_df)
+}
+
+# Calculate the summary statistics for each field
+field_summary <- summary_statistics(field_similarities_df)
+
+# Calculate the average similarity score for each duplicate pair
+average_similarity <- rowMeans(field_similarities_df)
+
+# Combine the field summary and average similarity into a single table
+summary_table <- field_summary %>%
+  bind_rows(tibble(pair = paste0("Pair ", 1:length(average_similarity)), average_similarity = average_similarity, check.names = FALSE)) %>%
+  t() %>% as.data.frame() %>%
+  rownames_to_column("Field")
+```
+
+```{r}
+# Table 1: Average similarity across all pairs for each field
+field_avg_similarity <- data.frame(
+  Field = colnames(field_similarities_df),
+  Avg_Similarity = sapply(field_similarities_df, mean),
+  stringsAsFactors = FALSE
+)
+
+# Table 2: Calculated scores for each pair with overall similarity score
+pair_scores <- field_similarities_df %>%
+  mutate(
+    Pair = paste0("Pair ", 1:nrow(field_similarities_df)),
+    Overall_Similarity = rowMeans(field_similarities_df)
+  ) %>%
+  select(Pair, everything())
+
+```
+
+```{r}
+library(dplyr)
+library(plotly)
+
+# Bin pairs by similarity score
+pair_scores_binned <- pair_scores %>%
+  mutate(Similarity_Bin = round(Overall_Similarity, 1)) %>%
+  group_by(Similarity_Bin) %>%
+  summarise(Count = n())
+
+# Create line plot
+plot_ly(data = pair_scores_binned, x = ~Similarity_Bin, y = ~Count, type = "scatter", mode = "lines+markers") %>%
+  layout(xaxis = list(title = "Similarity Score", tickvals = seq(0, 1, 0.1)), yaxis = list(title = "Count"))
+
+```
