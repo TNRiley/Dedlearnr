@@ -35,7 +35,7 @@ metadata_tbl <- tibble::tribble(
   dplyr::mutate(files = paste0(file_path, files))
 
 # Read citations
-citations <- read_citations(metadata = metadata_tbl)
+citations <- read_citations(metadata = metadata_tbl, only_key_fields = FALSE)
 
 
 ```
